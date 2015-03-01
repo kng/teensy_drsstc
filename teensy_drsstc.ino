@@ -9,20 +9,26 @@ int enabled[maxkeys];
 int currentnote[maxkeys];
 unsigned int pulse_off[maxkeys];
 unsigned int pulse_on[maxkeys];
-unsigned int pulse_holdoff=0;
 
 const int srate_pin = 13;
 const int pulse_pin = 14;
 
-int pulse_min = 10;   // DRSSTC minimum pulse to produce the arc
-int pulse_max = 150;  // DRSSTC maximum pulse before the cirrent limiting kicks in
-
-const int srate = 44100;    // 44.1kHz standard sampling rate
+const int srate = 100000; //44100;    // 44.1kHz standard sampling rate
 const int srate_us = 1000000/srate;  // how many microseconds each sample takes
 const int holdoff = 150;    // DRSSTC minimum dead time between pulses
 const int holdoff_cnt = holdoff / srate_us;  // holdoff in sample ticks
-const int frq_min = 100;    // lowest note/frequency that can be activated
+const int frq_min = 10;    // lowest note/frequency that can be activated
 const int frq_max = 2000;   // highest -||-
+const int maxpulse = 150;
+
+unsigned int pulse_holdoff=0;
+// the following values can be adjusted via MIDI CC
+int pulse_min = 10;   // DRSSTC minimum pulse to produce the arc
+int pulse_max = 150;  // DRSSTC maximum pulse before the cirrent limiting kicks in
+int frq_min_start = 100; // frequency at wich to start ramping down the pulse width
+int frq_max_start = 1000;
+
+float pitchInFrequency;
 
 void setup(void) {
   usbMIDI.setHandleNoteOff(OnNoteOff);
@@ -46,11 +52,12 @@ void setup(void) {
   }
 }
 
-void dr_pulse(void) {    // main synthesizer routine, gets called at SRATE (44.1kHz)
+void dr_pulse(void) {    // main synthesizer routine, gets called at SRATE
   int i;
-  int noteon = 0;
+  static int noteon, oldnoteon=0;
   digitalWriteFast(srate_pin, HIGH);  // debugging purposes
 
+  noteon = 0;
   for(i=0; i<maxkeys; i++){
     if(pulse_on[i] == 0){    // check if we're in the delay part or the pulse
       pulse_off[i]++;
@@ -60,20 +67,23 @@ void dr_pulse(void) {    // main synthesizer routine, gets called at SRATE (44.1
       }
     } else {
       pulse_on[i]++;
+      if(pulse_holdoff!=0) oldnoteon=1;  // block/trick the pulse entirely if in holdoff mode
       noteon=1;    // we have an active note in pulse mode
       if(pulse_on[i] > pulse_cnt[i]){  // pulse time expired, change to delay mode
         pulse_on[i] = 0;
         pulse_off[i] = 0;
       }
     }
-
-    if(noteon==1){
-      digitalWriteFast(pulse_pin, HIGH);
-      pulse_holdoff=holdoff_cnt;
-    }else{
-      digitalWriteFast(pulse_pin, LOW);
-    }
   }
+  if(noteon==1 && oldnoteon==0){  // detect rising edge
+    digitalWriteFast(pulse_pin, HIGH);
+    oldnoteon=1;
+  }else if(noteon==0 && oldnoteon==1){  // detect falling edge
+    digitalWriteFast(pulse_pin, LOW);
+    pulse_holdoff=holdoff_cnt;
+    oldnoteon=0;
+  }
+  if(pulse_holdoff>0) pulse_holdoff--;  // decrement holdoff counter
   digitalWriteFast(srate_pin, LOW);
 }
 
@@ -82,15 +92,22 @@ void loop(void) {
 }
 
 void OnNoteOn (byte channel, byte note, byte velocity) {
-  float pitchInFrequency = (440 * pow(2,((float)(note - 69)/12)));
-  float pitchInMicros = 500000.0 / pitchInFrequency;
+  pitchInFrequency = (440 * pow(2,((float)(note - 69)/12)));
 
   for(int i = 0; i<maxkeys; i++){
     if(enabled[i]==0){
       noInterrupts();
       currentnote[i] = note;
       frq[i] = pitchInFrequency;
-      pulse[i] = map(frq[i], frq_min, frq_max, pulse_max, pulse_min);
+
+      if(frq[i] < frq_min_start){
+        pulse[i] = pulse_max;
+      }else if(frq[i] > frq_max_start){
+        pulse[i] = pulse_min;
+      }else{
+        pulse[i] = map(frq[i], frq_min_start, frq_max_start, pulse_max, pulse_min);
+      }
+
       pulse_cnt[i] = pulse[i]/srate_us;
       frq_cnt[i] = (srate/frq[i])-pulse_cnt[i];
       if(frq[i] >= frq_min && frq[i] <= frq_max){
@@ -112,13 +129,16 @@ void OnNoteOff(byte channel, byte note, byte velocity) {
 }
 
 void OnControlChange(byte channel, byte control, byte value){
-  // knobs C10 = 0x16, C11 = 0x17
+  // knobs C10 = 0x16, C11 = 0x17, C12 = 3D, C13 = 17
   if(channel==1){
-    if(control==0x16){
-      pulse_min=map(value,0,127,10,150);
-    } else if(control==0x17){
-      pulse_max=map(value,0,127,10,150);
-    }
+    if(control==0x16){  // C10
+      pulse_min=map(value,0,127,0,maxpulse);
+    } else if(control==0x17){ // C11
+      pulse_max=map(value,0,127,0,maxpulse);
+    }else if(control==0x3D){ // C12
+      frq_min_start=map(value,0,127,frq_min,frq_max);
+    }else if(control==0x18){  // C13
+      frq_max_start=map(value,0,127,frq_min,frq_max);
+    } 
   }
 }
-
